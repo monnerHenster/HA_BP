@@ -1,9 +1,8 @@
 blueprint:
-  name: Group bidirectional switch sync (with lock)
+  name: Group bidirectional switch sync (with one lock)
   description: >
     组内任意一个 switch 状态变化都会同步到其它所有成员。
-    使用锁（group_lock 优先 / fallback global_lock）避免互相触发导致的死循环。
-    注意：请至少填入一个锁（group_lock 或 global_lock）。
+    使用一个 input_boolean 锁来避免死循环。每组推荐配置一个独立锁。
   domain: automation
   input:
     switches:
@@ -13,15 +12,9 @@ blueprint:
         entity:
           domain: switch
           multiple: true
-    group_lock:
-      name: 组专属锁（可选）
-      description: 推荐为每组单独创建一个 input_boolean 并填在这里以实现组间并行；留空则使用 global_lock。
-      selector:
-        entity:
-          domain: input_boolean
-    global_lock:
-      name: 全局锁（可选）
-      description: 如果不想为每组创建锁，可创建一个全局锁并把它填在这里。若同时填了 group_lock 将优先使用 group_lock。
+    sync_lock:
+      name: 同步锁 input_boolean
+      description: 创建一个 input_boolean，用作互斥锁（建议每组一个；不同组可复用同一个，但会串行）
       selector:
         entity:
           domain: input_boolean
@@ -33,35 +26,22 @@ trigger:
   - platform: state
     entity_id: !input switches
 
-# 强制要求至少设置一个锁（安全性）
-condition:
-  - condition: template
-    value_template: >-
-      {% set g = (expand('!input.group_lock') | length) %}
-      {% set glob = (expand('!input.global_lock') | length) %}
-      {{ (g > 0) or (glob > 0) }}
+condition: []
 
 action:
   - variables:
-      # 选择要使用的锁：优先 group_lock，否则使用 global_lock
-      lock_to_use: >-
-        {% if (expand('!input.group_lock') | length) > 0 %}
-          {{ !input.group_lock }}
-        {% else %}
-          {{ !input.global_lock }}
-        {% endif %}
       master: "{{ trigger.entity_id }}"
       master_state: "{{ trigger.to_state.state if trigger.to_state is not none else 'unknown' }}"
       members: >-
         {% set alls = !input.switches %}
         {{ alls | reject('equalto', master) | list }}
+      lock_to_use: !input sync_lock
   - choose:
       - conditions:
           - condition: state
             entity_id: "{{ lock_to_use }}"
             state: 'on'
         sequence:
-          # 如果锁正在被使用，什么都不做（避免等待/重入）
           - service: logbook.log
             data:
               name: "Switch sync"
@@ -69,27 +49,18 @@ action:
   - service: input_boolean.turn_on
     target:
       entity_id: "{{ lock_to_use }}"
-  - variables:
-      targets: "{{ members }}"
   - repeat:
-      for_each: "{{ targets }}"
+      for_each: "{{ members }}"
       sequence:
         - condition: template
-          # 只在目标和主开关当前状态不同时才执行（减少无谓触发）
-          value_template: >-
-            {% set s = states(item) %}
-            {{ s != master_state and s != 'unknown' }}
+          value_template: "{{ states(item) != master_state and states(item) != 'unknown' }}"
         - choose:
-            - conditions:
-                - condition: template
-                  value_template: "{{ master_state == 'on' }}"
+            - conditions: "{{ master_state == 'on' }}"
               sequence:
                 - service: switch.turn_on
                   target:
                     entity_id: "{{ item }}"
-            - conditions:
-                - condition: template
-                  value_template: "{{ master_state == 'off' }}"
+            - conditions: "{{ master_state == 'off' }}"
               sequence:
                 - service: switch.turn_off
                   target:
