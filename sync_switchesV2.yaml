@@ -1,20 +1,18 @@
 blueprint:
-  name: Group bidirectional switch sync (with one lock)
+  name: Group bidirectional switch sync (one lock; no !input in templates)
   description: >
     组内任意一个 switch 状态变化都会同步到其它所有成员。
-    使用一个 input_boolean 锁来避免死循环。每组推荐配置一个独立锁。
+    使用一个 input_boolean 锁避免死循环。把需要镜像的开关都放进同一组。
   domain: automation
   input:
     switches:
       name: 同步组（开关列表）
-      description: 组内任意一个开关变化都会同步到其它所有开关（不要把不在同组的放进来）
       selector:
         entity:
           domain: switch
           multiple: true
     sync_lock:
       name: 同步锁 input_boolean
-      description: 创建一个 input_boolean，用作互斥锁（建议每组一个；不同组可复用同一个，但会串行）
       selector:
         entity:
           domain: input_boolean
@@ -26,45 +24,50 @@ trigger:
   - platform: state
     entity_id: !input switches
 
-condition: []
+# 锁为 on 时直接不执行（避免进入 action）
+condition:
+  - condition: state
+    entity_id: !input sync_lock
+    state: 'off'
 
 action:
   - variables:
       master: "{{ trigger.entity_id }}"
       master_state: "{{ trigger.to_state.state if trigger.to_state is not none else 'unknown' }}"
-      members: >-
-        {% set alls = !input.switches %}
-        {{ alls | reject('equalto', master) | list }}
-      lock_to_use: !input sync_lock
-  - choose:
-      - conditions:
-          - condition: state
-            entity_id: "{{ lock_to_use }}"
-            state: 'on'
-        sequence:
-          - service: logbook.log
-            data:
-              name: "Switch sync"
-              message: "Skipped sync because lock {{ lock_to_use }} is on. Trigger: {{ master }} -> {{ master_state }}"
+
   - service: input_boolean.turn_on
     target:
-      entity_id: "{{ lock_to_use }}"
+      entity_id: !input sync_lock
+
+  # 逐个处理本组成员（不用模板拿 !input，直接在 for_each 里用）
   - repeat:
-      for_each: "{{ members }}"
+      for_each: !input switches
       sequence:
+        # 跳过触发者自己
         - condition: template
-          value_template: "{{ states(item) != master_state and states(item) != 'unknown' }}"
+          value_template: "{{ repeat.item != master }}"
+
+        # 仅当目标状态与主状态不同，且目标状态不是 unknown 时才执行
+        - condition: template
+          value_template: "{{ states(repeat.item) != master_state and states(repeat.item) != 'unknown' }}"
+
+        # 执行与主状态一致的操作
         - choose:
-            - conditions: "{{ master_state == 'on' }}"
+            - conditions:
+                - condition: template
+                  value_template: "{{ master_state == 'on' }}"
               sequence:
                 - service: switch.turn_on
                   target:
-                    entity_id: "{{ item }}"
-            - conditions: "{{ master_state == 'off' }}"
+                    entity_id: "{{ repeat.item }}"
+            - conditions:
+                - condition: template
+                  value_template: "{{ master_state == 'off' }}"
               sequence:
                 - service: switch.turn_off
                   target:
-                    entity_id: "{{ item }}"
+                    entity_id: "{{ repeat.item }}"
+
   - service: input_boolean.turn_off
     target:
-      entity_id: "{{ lock_to_use }}"
+      entity_id: !input sync_lock
