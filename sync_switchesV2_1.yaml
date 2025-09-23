@@ -1,0 +1,70 @@
+blueprint:
+  name: Group bidirectional sync (switch + light, one lock)
+  description: >
+    组内任意一个成员（switch 或 light）状态变化为 on/off 时，同步到其它所有成员。
+    使用一个 input_boolean 锁避免死循环。把需要镜像的开关/灯都放进同一组。
+  domain: automation
+  input:
+    members:
+      name: 同步组（开关/灯）
+      selector:
+        entity:
+          domain:
+            - switch
+            - light
+          multiple: true
+    sync_lock:
+      name: 同步锁 input_boolean
+      selector:
+        entity:
+          domain: input_boolean
+
+mode: queued
+max_exceeded: silent
+
+trigger:
+  - platform: state
+    entity_id: !input members
+    # 只对 on/off 的变化做同步，亮度等属性变化不触发
+    to:
+      - 'on'
+      - 'off'
+
+# 锁为 on 时直接不执行（避免进入 action）
+condition:
+  - condition: state
+    entity_id: !input sync_lock
+    state: 'off'
+
+action:
+  - variables:
+      master: "{{ trigger.entity_id }}"
+      master_state: "{{ trigger.to_state.state if trigger.to_state is not none else 'unknown' }}"
+
+  - service: input_boolean.turn_on
+    target:
+      entity_id: !input sync_lock
+
+  # 逐个处理本组成员
+  - repeat:
+      for_each: !input members
+      sequence:
+        # 跳过触发者自己
+        - condition: template
+          value_template: "{{ repeat.item != master }}"
+
+        # 仅当目标是 on/off 域有效状态，且与主状态不同才执行
+        - condition: template
+          value_template: >
+            {% set s = states(repeat.item) %}
+            {{ s in ['on','off'] and s != master_state }}
+
+        # 根据实体域动态选择正确的服务（switch.* 或 light.*）
+        - service: >
+            {{ repeat.item.split('.')[0] }}.{{ 'turn_on' if master_state == 'on' else 'turn_off' }}
+          target:
+            entity_id: "{{ repeat.item }}"
+
+  - service: input_boolean.turn_off
+    target:
+      entity_id: !input sync_lock
