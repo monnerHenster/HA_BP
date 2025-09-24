@@ -1,17 +1,28 @@
 blueprint:
-  name: Auto Unlock Sync Lock after 5s
+  name: Auto Unlock Sync Lock
   description: >
-    监控一个或多个 input_boolean 锁，如果保持 ON 超过 5 秒，自动关闭。
+    监控一个或多个 input_boolean 锁，如果保持 ON 超过指定时间，则自动关闭。
     可作为“同步锁”的兜底看门狗，防止蓝图异常导致锁卡死。
   domain: automation
   input:
     locks:
       name: 需要监控的锁
-      description: 选择一个或多个 input_boolean，超过 5 秒保持 ON 会被强制关闭
+      description: 选择一个或多个 input_boolean，超过指定时间保持 ON 会被强制关闭
       selector:
         entity:
           domain: input_boolean
           multiple: true
+    unlock_after:
+      name: 自动解锁延时（秒）
+      description: 锁保持 ON 的最长时间（秒）。到达后会强制 turn_off。
+      default: 5
+      selector:
+        number:
+          min: 1
+          max: 600
+          unit_of_measurement: s
+          mode: box
+          step: 1
 
 mode: parallel
 max_exceeded: silent
@@ -20,7 +31,8 @@ trigger:
   - platform: state
     entity_id: !input locks
     to: 'on'
-    for: '00:00:05'
+    for:
+      seconds: !input unlock_after
 
 action:
   - service: input_boolean.turn_off
