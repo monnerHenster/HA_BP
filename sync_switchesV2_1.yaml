@@ -1,36 +1,41 @@
 blueprint:
-  name: Group bidirectional sync (switch + light, one lock)
+  name: Switch Group Sync (one lock, v3 with auto-unlock)
   description: >
-    组内任意一个成员（switch 或 light）状态变化为 on/off 时，同步到其它所有成员。
-    使用一个 input_boolean 锁避免死循环。把需要镜像的开关/灯都放进同一组。
+    组内任意一个 switch 状态变化都会同步到其它成员；使用一个 input_boolean 锁避免死循环。
+    增强：并行“自解锁保险”（超时仍为 on 则强制解锁）。
   domain: automation
   input:
-    members:
-      name: 同步组（开关/灯）
+    switches:
+      name: 同步组（开关列表）
       selector:
         entity:
-          domain:
-            - switch
-            - light
+          domain: switch
           multiple: true
     sync_lock:
       name: 同步锁 input_boolean
       selector:
         entity:
           domain: input_boolean
+    auto_unlock_after:
+      name: 自解锁超时（秒）
+      description: 达到该秒数仍然为 on 则自动 turn_off；留空或 0 表示不启用保险
+      default: 30
+      selector:
+        number:
+          min: 0
+          max: 600
+          unit_of_measurement: s
+          mode: box
+          step: 1
 
 mode: queued
 max_exceeded: silent
 
 trigger:
   - platform: state
-    entity_id: !input members
-    # 只对 on/off 的变化做同步，亮度等属性变化不触发
-    to:
-      - 'on'
-      - 'off'
+    entity_id: !input switches
 
-# 锁为 on 时直接不执行（避免进入 action）
+# 锁为 on 时直接跳过（避免重入）
 condition:
   - condition: state
     entity_id: !input sync_lock
@@ -39,32 +44,51 @@ condition:
 action:
   - variables:
       master: "{{ trigger.entity_id }}"
-      master_state: "{{ trigger.to_state.state if trigger.to_state is not none else 'unknown' }}"
+      master_state: "{{ trigger.to_state.state | default('unknown') }}"
+      _lock: !input sync_lock
+      _auto: !input auto_unlock_after
 
+  # 上锁
   - service: input_boolean.turn_on
-    target:
-      entity_id: !input sync_lock
+    target: { entity_id: "{{ _lock }}" }
 
-  # 逐个处理本组成员
+  # 并行启动“自解锁保险”（仅当 _auto > 0）
+  - if:
+      - condition: template
+        value_template: "{{ (_auto | int(0)) > 0 }}"
+    then:
+      - parallel:
+          - sequence:
+              - delay:
+                  seconds: "{{ _auto | int }}"
+              - if:
+                  - condition: state
+                    entity_id: "{{ _lock }}"
+                    state: 'on'
+                then:
+                  - service: input_boolean.turn_off
+                    target: { entity_id: "{{ _lock }}" }
+
+  # 同步其它成员（不在模板中直接引用 !input；用 repeat.item）
   - repeat:
-      for_each: !input members
+      for_each: !input switches
       sequence:
-        # 跳过触发者自己
         - condition: template
           value_template: "{{ repeat.item != master }}"
-
-        # 仅当目标是 on/off 域有效状态，且与主状态不同才执行
         - condition: template
-          value_template: >
-            {% set s = states(repeat.item) %}
-            {{ s in ['on','off'] and s != master_state }}
+          value_template: >-
+            {{ states(repeat.item) != master_state
+               and states(repeat.item) not in ['unknown','unavailable'] }}
+        - choose:
+            - conditions: "{{ master_state == 'on' }}"
+              sequence:
+                - service: switch.turn_on
+                  target: { entity_id: "{{ repeat.item }}" }
+            - conditions: "{{ master_state == 'off' }}"
+              sequence:
+                - service: switch.turn_off
+                  target: { entity_id: "{{ repeat.item }}" }
 
-        # 根据实体域动态选择正确的服务（switch.* 或 light.*）
-        - service: >
-            {{ repeat.item.split('.')[0] }}.{{ 'turn_on' if master_state == 'on' else 'turn_off' }}
-          target:
-            entity_id: "{{ repeat.item }}"
-
+  # 正常解锁
   - service: input_boolean.turn_off
-    target:
-      entity_id: !input sync_lock
+    target: { entity_id: "{{ _lock }}" }
