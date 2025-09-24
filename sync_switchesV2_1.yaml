@@ -1,5 +1,5 @@
 blueprint:
-  name: Group sync for Switch & Light (one lock, auto-unlock)
+  name: Group sync for Switch & Light (one lock, auto-unlock v4)
   description: >
     组内任意一个实体（switch 或 light）状态改变时，把状态同步到组内其他实体。
     使用一个 input_boolean 作为互斥锁，内置超时自解锁（默认 30 秒），避免死循环/雪崩触发。
@@ -17,7 +17,6 @@ blueprint:
           domain: input_boolean
     auto_unlock_after:
       name: 自解锁超时（秒，0 表示关闭）
-      description: 上锁后超过该时长若仍为 on，将自动 turn_off 以防卡死。
       default: 30
       selector:
         number:
@@ -47,7 +46,7 @@ action:
       _lock: !input sync_lock
       _auto: !input auto_unlock_after
 
-  # 只接受 on/off 两种状态，其余（如 unknown/unavailable）直接跳过
+  # 仅接受 on/off 两种状态
   - condition: template
     value_template: "{{ master_state in ['on','off'] }}"
 
@@ -56,7 +55,7 @@ action:
     target:
       entity_id: "{{ _lock }}"
 
-  # 并行启动“自解锁保险”（可选）
+  # 并行启动“自解锁保险”（仅当 _auto > 0）
   - if:
       - condition: template
         value_template: "{{ (_auto | int(0)) > 0 }}"
@@ -65,36 +64,30 @@ action:
           - sequence:
               - delay:
                   seconds: "{{ _auto | int }}"
-              - if:
-                  - condition: state
-                    entity_id: "{{ _lock }}"
-                    state: 'on'
-                then:
-                  - service: input_boolean.turn_off
-                    target:
-                      entity_id: "{{ _lock }}"
+              - condition: template
+                value_template: "{{ states(_lock) == 'on' }}"
+              - service: input_boolean.turn_off
+                target:
+                  entity_id: "{{ _lock }}"
 
-  # 逐个处理本组成员（注意：此处不用在模板里引用 !input）
+  # 逐个处理本组成员
   - repeat:
       for_each: !input entities
       sequence:
-        # 1) 跳过触发者自身
+        # 跳过触发者自身
         - condition: template
           value_template: "{{ repeat.item != master }}"
-
-        # 2) 仅同步 switch/light 两个域，其它域直接跳过，防误选
+        # 仅同步 switch/light 两个域
         - condition: template
           value_template: >
             {% set d = repeat.item.split('.')[0] %}
             {{ d in ['switch','light'] }}
-
-        # 3) 目标当前状态需有效且与主状态不同
+        # 目标当前状态需有效且与主状态不同
         - condition: template
           value_template: >
-            {{ states(repeat.item) not in ['unknown','unavailable'] and
-               states(repeat.item) != master_state }}
-
-        # 4) 动态决定服务：switch.turn_on/off 或 light.turn_on/off
+            {{ states(repeat.item) not in ['unknown','unavailable']
+               and states(repeat.item) != master_state }}
+        # 动态决定服务：switch.turn_on/off 或 light.turn_on/off
         - service: >
             {% set d = repeat.item.split('.')[0] %}
             {{ d }}.turn_{{ master_state }}
