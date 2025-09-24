@@ -1,8 +1,9 @@
 blueprint:
-  name: Group sync for Switch & Light (one lock, auto-unlock v4)
+  name: Group sync for Switch & Light (one lock, no auto-unlock)
   description: >
     组内任意一个实体（switch 或 light）状态改变时，把状态同步到组内其他实体。
-    使用一个 input_boolean 作为互斥锁，内置超时自解锁（默认 30 秒），避免死循环/雪崩触发。
+    使用一个 input_boolean 作为互斥锁，避免死循环/雪崩触发。
+    （超时解锁逻辑已移除，推荐搭配独立的看门狗自动化使用。）
   domain: automation
   input:
     entities:
@@ -15,16 +16,6 @@ blueprint:
       selector:
         entity:
           domain: input_boolean
-    auto_unlock_after:
-      name: 自解锁超时（秒，0 表示关闭）
-      default: 30
-      selector:
-        number:
-          min: 0
-          max: 600
-          unit_of_measurement: s
-          mode: box
-          step: 1
 
 mode: queued
 max_exceeded: silent
@@ -44,7 +35,6 @@ action:
       master: "{{ trigger.entity_id }}"
       master_state: "{{ trigger.to_state.state | default('unknown') }}"
       _lock: !input sync_lock
-      _auto: !input auto_unlock_after
 
   # 仅接受 on/off 两种状态
   - condition: template
@@ -54,21 +44,6 @@ action:
   - service: input_boolean.turn_on
     target:
       entity_id: "{{ _lock }}"
-
-  # 并行启动“自解锁保险”（仅当 _auto > 0）
-  - if:
-      - condition: template
-        value_template: "{{ (_auto | int(0)) > 0 }}"
-    then:
-      - parallel:
-          - sequence:
-              - delay:
-                  seconds: "{{ _auto | int }}"
-              - condition: template
-                value_template: "{{ states(_lock) == 'on' }}"
-              - service: input_boolean.turn_off
-                target:
-                  entity_id: "{{ _lock }}"
 
   # 逐个处理本组成员
   - repeat:
